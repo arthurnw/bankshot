@@ -43,6 +43,10 @@ type MonitorConfig struct {
 	IgnoreProcesses []string    `yaml:"ignoreProcesses,omitempty"`
 	PollInterval    string      `yaml:"pollInterval,omitempty"`
 	GracePeriod     string      `yaml:"gracePeriod,omitempty"`
+	// BatchWindow coalesces a burst of newly-opened ports into a single forward
+	// request (and a single rolled-up notification). Defaults to 500ms. Set to
+	// "0" to forward each port immediately as it's discovered.
+	BatchWindow string `yaml:"batchWindow,omitempty"`
 }
 
 // PortRange defines a range of ports

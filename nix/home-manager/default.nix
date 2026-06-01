@@ -24,6 +24,7 @@ with lib; let
       ignoreProcesses = cfg.monitor.ignoreProcesses;
       pollInterval = cfg.monitor.pollInterval;
       gracePeriod = cfg.monitor.gracePeriod;
+      batchWindow = cfg.monitor.batchWindow;
     };
   } // lib.optionalAttrs cfg.opProxy.enabled {
     op_proxy = {
@@ -200,6 +201,12 @@ in {
         type = types.str;
         default = "30s";
         description = "Grace period before removing forwards after port close (applies to bankshot monitor on remote servers)";
+      };
+
+      batchWindow = mkOption {
+        type = types.str;
+        default = "500ms";
+        description = "Window to coalesce a burst of newly-opened ports into a single forward request and one rolled-up notification. Set to \"0\" to forward each port immediately (applies to bankshot monitor on remote servers).";
       };
     };
 

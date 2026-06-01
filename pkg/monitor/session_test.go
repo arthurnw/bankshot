@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"testing"
@@ -29,13 +30,34 @@ func (m *mockDaemonClient) SendRequest(req *protocol.Request) (*protocol.Respons
 	return &protocol.Response{Success: true}, nil
 }
 
+// requestsOfType returns all recorded requests of the given command type.
+func (m *mockDaemonClient) requestsOfType(t protocol.CommandType) []*protocol.Request {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*protocol.Request
+	for _, r := range m.requests {
+		if r.Type == t {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// forwardCount returns the total number of ports requested for forwarding,
+// counting both single forwards and the ports inside batch requests.
 func (m *mockDaemonClient) forwardCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	count := 0
 	for _, r := range m.requests {
-		if r.Type == protocol.CommandForward {
+		switch r.Type {
+		case protocol.CommandForward:
 			count++
+		case protocol.CommandForwardBatch:
+			var br protocol.BatchForwardRequest
+			if err := json.Unmarshal(r.Payload, &br); err == nil {
+				count += len(br.Forwards)
+			}
 		}
 	}
 	return count

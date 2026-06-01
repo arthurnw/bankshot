@@ -246,6 +246,8 @@ func (d *Daemon) handleCommand(req *protocol.Request) *protocol.Response {
 		return d.handleListCommand(req)
 	case protocol.CommandForward:
 		return d.handleForwardCommand(req)
+	case protocol.CommandForwardBatch:
+		return d.handleForwardBatchCommand(req)
 	case protocol.CommandUnforward:
 		return d.handleUnforwardCommand(req)
 	case protocol.CommandReconcile:
@@ -407,6 +409,78 @@ func (d *Daemon) handleForwardCommand(req *protocol.Request) *protocol.Response 
 			host, forwardReq.RemotePort, localPort),
 		"socket_path": socketPath,
 	})
+	return resp
+}
+
+// handleForwardBatchCommand handles a batch of port forwards from the monitor.
+// It establishes every forward, then posts a single rolled-up notification for
+// the ones that were newly created so an initial SSH connection doesn't spam
+// the user with one toast per port.
+func (d *Daemon) handleForwardBatchCommand(req *protocol.Request) *protocol.Response {
+	var batchReq protocol.BatchForwardRequest
+	if err := json.Unmarshal(req.Payload, &batchReq); err != nil {
+		d.logger.Error("Failed to parse batch forward request",
+			"error", err,
+			"payload", string(req.Payload))
+		return protocol.NewErrorResponse(req.ID, fmt.Errorf("invalid batch forward request format: %w", err))
+	}
+
+	// Resolve the control socket once for the whole batch.
+	socketPath := batchReq.SocketPath
+	if socketPath == "" {
+		var err error
+		socketPath, err = forwarder.FindControlSocket(batchReq.ConnectionInfo)
+		if err != nil {
+			return protocol.NewErrorResponse(req.ID, fmt.Errorf("failed to find SSH socket: %w", err))
+		}
+	}
+
+	results := make([]protocol.BatchForwardResult, 0, len(batchReq.Forwards))
+	var created []notify.ForwardEvent
+
+	for _, fwd := range batchReq.Forwards {
+		host := fwd.Host
+		if host == "" {
+			host = "localhost"
+		}
+		localPort := fwd.LocalPort
+		if localPort == 0 {
+			localPort = fwd.RemotePort
+		}
+
+		wasCreated, err := d.forwarder.AddForward(socketPath, batchReq.ConnectionInfo, fwd.RemotePort, fwd.LocalPort, fwd.Host)
+		res := protocol.BatchForwardResult{
+			RemotePort: fwd.RemotePort,
+			LocalPort:  localPort,
+			Created:    wasCreated,
+		}
+		if err != nil {
+			res.Error = err.Error()
+			d.logger.Warn("Batch forward failed for port",
+				"port", fwd.RemotePort,
+				"connectionInfo", batchReq.ConnectionInfo,
+				"error", err)
+		} else if wasCreated {
+			created = append(created, notify.ForwardEvent{
+				RemotePort:  fwd.RemotePort,
+				LocalPort:   localPort,
+				Host:        host,
+				ProcessName: fwd.ProcessName,
+				ProcessCwd:  fwd.ProcessCwd,
+			})
+		}
+		results = append(results, res)
+	}
+
+	// One notification for the whole batch (single or rollup, decided downstream).
+	if len(created) > 0 {
+		d.notifier.NotifyForwards(batchReq.ConnectionInfo, created)
+	}
+
+	resp, err := protocol.NewSuccessResponse(req.ID, protocol.BatchForwardResponse{Results: results})
+	if err != nil {
+		return protocol.NewErrorResponse(req.ID, err)
+	}
 	return resp
 }
 

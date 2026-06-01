@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,9 @@ type SessionMonitor struct {
 	gracePeriod        time.Duration
 	activeForwards     map[string]ForwardInfo // key: "port" (PID not needed)
 	pendingRemovals    map[string]time.Time   // forwards pending removal
+	batchWindow        time.Duration          // coalesce newly-opened ports for this long before forwarding
+	pendingBatch       map[int]PortEvent      // ports awaiting the next batch flush, keyed by port
+	batchTimer         *time.Timer            // fires batchWindow after the first port in the current batch
 	mutex              sync.RWMutex
 }
 
@@ -77,6 +81,7 @@ type SessionConfig struct {
 	IgnorePorts     []int
 	IgnoreProcesses []string
 	GracePeriod     time.Duration
+	BatchWindow     time.Duration // coalesce a burst of newly-opened ports into one forward request
 	Logger          *slog.Logger
 	PortEventSource PortEventSource
 }
@@ -120,8 +125,10 @@ func NewSessionMonitor(cfg SessionConfig) (*SessionMonitor, error) {
 		resolveProcessCwd:  ResolveProcessCwd,
 		resolveParentPID:   ResolveParentPID,
 		gracePeriod:        cfg.GracePeriod,
+		batchWindow:        cfg.BatchWindow,
 		activeForwards:     make(map[string]ForwardInfo),
 		pendingRemovals:    make(map[string]time.Time),
+		pendingBatch:       make(map[int]PortEvent),
 	}, nil
 }
 
@@ -208,89 +215,149 @@ func (m *SessionMonitor) handlePortEvent(event PortEvent) {
 	}
 }
 
-// handlePortOpened creates a forward for a newly opened port
+// handlePortOpened queues a newly opened port for the next batch forward.
 func (m *SessionMonitor) handlePortOpened(key string, event PortEvent) {
 	m.mutex.Lock()
-	defer m.mutex.Unlock()
 
 	// Check if this port had a pending removal (server restart case)
-	_, wasPending := m.pendingRemovals[key]
-	if wasPending {
+	if _, wasPending := m.pendingRemovals[key]; wasPending {
 		delete(m.pendingRemovals, key)
 		m.logger.Info("Canceled pending removal for reopened port",
 			"port", event.Port,
 			"protocol", event.Protocol)
-
-		// Re-request forward to ensure daemon still has it (idempotent)
-		// This handles the case where daemon state was lost
-		m.requestForward(key, event)
+		// Fall through to re-enqueue: forwarding is idempotent, so this
+		// re-establishes the forward if the daemon lost its state.
+	} else if _, exists := m.activeForwards[key]; exists {
+		m.mutex.Unlock()
 		return
 	}
 
-	// Check if already forwarded
-	if _, exists := m.activeForwards[key]; exists {
-		return
-	}
+	m.enqueueForwardLocked(event)
+	immediate := m.batchWindow <= 0
+	m.mutex.Unlock()
 
-	m.requestForward(key, event)
+	// With no batch window configured, forward immediately (preserves the
+	// original one-request-per-port behavior; used by tests).
+	if immediate {
+		m.flushBatch()
+	}
 }
 
-// requestForward sends a forward request to the daemon and tracks it locally.
-// This is idempotent - the daemon returns success if the forward already exists.
-// Must be called with m.mutex held.
-func (m *SessionMonitor) requestForward(key string, event PortEvent) {
+// enqueueForwardLocked adds a port to the pending batch and arms the flush
+// timer if it isn't already running. Must be called with m.mutex held.
+func (m *SessionMonitor) enqueueForwardLocked(event PortEvent) {
+	m.pendingBatch[event.Port] = event
+	if m.batchWindow > 0 && m.batchTimer == nil {
+		m.batchTimer = time.AfterFunc(m.batchWindow, m.flushBatch)
+	}
+}
+
+// flushBatch sends every pending port to the daemon as one batched forward
+// request. A burst of ports opened on connection thus becomes a single request
+// and a single (rolled-up) notification.
+func (m *SessionMonitor) flushBatch() {
+	m.mutex.Lock()
+	if m.batchTimer != nil {
+		m.batchTimer.Stop()
+		m.batchTimer = nil
+	}
+	if len(m.pendingBatch) == 0 {
+		m.mutex.Unlock()
+		return
+	}
+	events := make([]PortEvent, 0, len(m.pendingBatch))
+	for _, e := range m.pendingBatch {
+		events = append(events, e)
+	}
+	m.pendingBatch = make(map[int]PortEvent)
+	m.mutex.Unlock()
+
+	sort.Slice(events, func(i, j int) bool { return events[i].Port < events[j].Port })
+	m.sendBatchForward(events)
+}
+
+// sendBatchForward forwards a set of ports in a single request and records the
+// ones that succeeded as active forwards. This is idempotent - the daemon
+// returns success for forwards that already exist.
+func (m *SessionMonitor) sendBatchForward(events []PortEvent) {
+	ports := make([]protocol.BatchForwardPort, 0, len(events))
+	for _, e := range events {
+		ports = append(ports, protocol.BatchForwardPort{
+			RemotePort:  e.Port,
+			LocalPort:   e.Port,
+			Host:        "localhost",
+			ProcessName: e.ProcessName,
+			ProcessCwd:  e.ProcessCwd,
+		})
+	}
+
 	req := &protocol.Request{
 		ID:   uuid.New().String(),
-		Type: protocol.CommandForward,
+		Type: protocol.CommandForwardBatch,
 	}
-
-	payload := protocol.ForwardRequest{
-		RemotePort:     event.Port,
-		LocalPort:      event.Port,
-		Host:           "localhost",
-		ConnectionInfo: m.sessionID, // sessionID is now the hostname for SSH connection matching
-		ProcessName:    event.ProcessName,
-		ProcessCwd:     event.ProcessCwd,
+	payload := protocol.BatchForwardRequest{
+		ConnectionInfo: m.sessionID, // sessionID is the hostname for SSH connection matching
+		Forwards:       ports,
 	}
-
 	payloadBytes, _ := json.Marshal(payload)
 	req.Payload = payloadBytes
 
-	m.logger.Info("Requesting auto-forward",
-		"port", event.Port,
-		"protocol", event.Protocol,
-		"pid", event.PID,
-		"process", event.ProcessName)
+	m.logger.Info("Requesting batched auto-forward", "ports", len(ports))
 
 	resp, err := m.daemonClient.SendRequest(req)
 	if err != nil {
-		m.logger.Error("Failed to request forward",
-			"error", err,
-			"port", event.Port)
+		m.logger.Error("Failed to request batch forward", "error", err, "ports", len(ports))
 		return
 	}
-
 	if !resp.Success {
-		m.logger.Error("Forward request failed",
-			"error", resp.Error,
-			"port", event.Port)
+		m.logger.Error("Batch forward request failed", "error", resp.Error, "ports", len(ports))
 		return
 	}
 
-	// Track the forward
-	m.activeForwards[key] = ForwardInfo{
-		PID:         event.PID,
-		Port:        event.Port,
-		ProcessName: event.ProcessName,
-		RequestID:   req.ID,
-		CreatedAt:   time.Now(),
+	// Parse per-port results so we only track forwards that actually succeeded.
+	var batchResp protocol.BatchForwardResponse
+	if len(resp.Data) > 0 {
+		if err := json.Unmarshal(resp.Data, &batchResp); err != nil {
+			m.logger.Warn("Failed to parse batch forward response, assuming all succeeded", "error", err)
+		}
 	}
 
-	m.logger.Info("Auto-forward created",
-		"port", event.Port,
-		"protocol", event.Protocol,
-		"pid", event.PID,
-		"process", event.ProcessName)
+	byPort := make(map[int]PortEvent, len(events))
+	for _, e := range events {
+		byPort[e.Port] = e
+	}
+
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	record := func(e PortEvent) {
+		m.activeForwards[fmt.Sprintf("%d", e.Port)] = ForwardInfo{
+			PID:         e.PID,
+			Port:        e.Port,
+			ProcessName: e.ProcessName,
+			RequestID:   req.ID,
+			CreatedAt:   time.Now(),
+		}
+	}
+
+	if len(batchResp.Results) > 0 {
+		for _, r := range batchResp.Results {
+			if r.Error != "" {
+				m.logger.Warn("Port failed to forward in batch", "port", r.RemotePort, "error", r.Error)
+				continue
+			}
+			if e, ok := byPort[r.RemotePort]; ok {
+				record(e)
+			}
+		}
+	} else {
+		// No structured results - track everything we sent.
+		for _, e := range events {
+			record(e)
+		}
+	}
+
+	m.logger.Info("Batch auto-forward complete", "ports", len(ports))
 }
 
 // handlePortClosed marks a forward for removal after grace period
@@ -461,6 +528,13 @@ func (m *SessionMonitor) cleanup() error {
 
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+
+	// Cancel any pending batch so it can't fire after shutdown.
+	if m.batchTimer != nil {
+		m.batchTimer.Stop()
+		m.batchTimer = nil
+	}
+	m.pendingBatch = make(map[int]PortEvent)
 
 	// Remove all active forwards
 	for _, fwd := range m.activeForwards {

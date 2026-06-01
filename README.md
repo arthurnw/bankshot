@@ -146,6 +146,7 @@ monitor:
     - ssh-agent
   pollInterval: 1s
   gracePeriod: 30s
+  batchWindow: 500ms     # coalesce a burst of new ports into one forward + one notification (0 = immediate)
 ```
 
 With NixOS/home-manager, configure via `programs.bankshot.monitor.*` options.

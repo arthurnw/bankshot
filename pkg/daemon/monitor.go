@@ -97,6 +97,7 @@ func (d *Monitor) Start(ctx context.Context) error {
 	ignoreProcesses := []string{"sshd", "systemd", "ssh-agent", "/\\.test$/"}
 	pollInterval := 5 * time.Second // Default to 5s for reasonable CPU usage
 	gracePeriod := 30 * time.Second
+	batchWindow := 500 * time.Millisecond // Coalesce a burst of newly-opened ports
 
 	// Override with config if present
 	if len(d.config.Monitor.PortRanges) > 0 {
@@ -118,6 +119,11 @@ func (d *Monitor) Start(ctx context.Context) error {
 			gracePeriod = duration
 		}
 	}
+	if d.config.Monitor.BatchWindow != "" {
+		if duration, err := time.ParseDuration(d.config.Monitor.BatchWindow); err == nil {
+			batchWindow = duration
+		}
+	}
 
 	// Create port event source (eBPF on Linux if available, else polling)
 	portSource := monitor.NewSystemPortEventSource(d.logger, pollInterval)
@@ -130,6 +136,7 @@ func (d *Monitor) Start(ctx context.Context) error {
 		IgnorePorts:     ignorePorts,
 		IgnoreProcesses: ignoreProcesses,
 		GracePeriod:     gracePeriod,
+		BatchWindow:     batchWindow,
 		Logger:          d.logger,
 		PortEventSource: portSource,
 	})
@@ -431,36 +438,39 @@ func (d *Monitor) Reconcile() error {
 		"toUnforward", len(toUnforward),
 		"unchanged", len(vmListeningInRange)-len(toForward))
 
-	// Execute forwards
-	for _, port := range toForward {
-		d.logger.Info("Requesting forward for VM port", "port", port)
-		fwdReq := &protocol.Request{
-			ID:   "reconcile-fwd-" + fmt.Sprintf("%d-%d", port, time.Now().Unix()),
-			Type: protocol.CommandForward,
+	// Execute forwards as a single batch so a reconnect that re-forwards many
+	// ports produces one rolled-up notification instead of one per port.
+	if len(toForward) > 0 {
+		ports := make([]protocol.BatchForwardPort, 0, len(toForward))
+		for _, port := range toForward {
+			ports = append(ports, protocol.BatchForwardPort{
+				RemotePort: port,
+				LocalPort:  port,
+				Host:       "localhost",
+			})
 		}
 
-		payload, err := json.Marshal(protocol.ForwardRequest{
-			RemotePort:     port,
-			LocalPort:      port,
-			Host:           "localhost",
+		fwdReq := &protocol.Request{
+			ID:   "reconcile-fwd-batch-" + fmt.Sprintf("%d", time.Now().Unix()),
+			Type: protocol.CommandForwardBatch,
+		}
+		payload, err := json.Marshal(protocol.BatchForwardRequest{
 			ConnectionInfo: sessionID,
+			Forwards:       ports,
 		})
 		if err != nil {
-			d.logger.Warn("Failed to marshal forward request", "port", port, "error", err)
-			continue
-		}
-		fwdReq.Payload = payload
-
-		fwdResp, err := daemonClient.SendRequest(fwdReq)
-		if err != nil {
-			d.logger.Warn("Failed to request forward", "port", port, "error", err)
-			continue
-		}
-
-		if !fwdResp.Success {
-			d.logger.Warn("Forward request failed", "port", port, "error", fwdResp.Error)
+			d.logger.Warn("Failed to marshal batch forward request", "error", err)
 		} else {
-			d.logger.Info("Successfully requested forward", "port", port)
+			fwdReq.Payload = payload
+			d.logger.Info("Requesting batch forward for VM ports", "ports", len(ports))
+			fwdResp, err := daemonClient.SendRequest(fwdReq)
+			if err != nil {
+				d.logger.Warn("Failed to request batch forward", "error", err)
+			} else if !fwdResp.Success {
+				d.logger.Warn("Batch forward request failed", "error", fwdResp.Error)
+			} else {
+				d.logger.Info("Successfully requested batch forward", "ports", len(ports))
+			}
 		}
 	}
 
