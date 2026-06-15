@@ -23,7 +23,7 @@ in {
       type = types.package;
       default =
         if bankshotPackages != null
-        then bankshotPackages.${pkgs.system}.default
+        then bankshotPackages.${pkgs.stdenv.hostPlatform.system}.default
         else throw "bankshot package must be provided when not using the flake module";
       defaultText = literalExpression "bankshot.packages.\${system}.default";
       description = "The bankshot package to wrap with capabilities.";
