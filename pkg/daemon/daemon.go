@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -224,7 +225,11 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		return
 	}
 
-	d.logger.Info("Received command", "type", req.Type, "id", req.ID, "remote", remoteAddr)
+	if isConnectivityProbe(req) {
+		d.logger.Debug("Received command", "type", req.Type, "id", req.ID, "remote", remoteAddr)
+	} else {
+		d.logger.Info("Received command", "type", req.Type, "id", req.ID, "remote", remoteAddr)
+	}
 
 	// Handle command
 	resp := d.handleCommand(req)
@@ -259,6 +264,10 @@ func (d *Daemon) handleCommand(req *protocol.Request) *protocol.Response {
 	}
 }
 
+func isConnectivityProbe(req *protocol.Request) bool {
+	return req.Type == protocol.CommandStatus && strings.HasPrefix(req.ID, "connectivity-check-")
+}
+
 // handleOpenCommand handles the open URL command
 func (d *Daemon) handleOpenCommand(req *protocol.Request) *protocol.Response {
 	// Parse payload
@@ -281,11 +290,6 @@ func (d *Daemon) handleOpenCommand(req *protocol.Request) *protocol.Response {
 
 // handleStatusCommand handles the status command
 func (d *Daemon) handleStatusCommand(req *protocol.Request) *protocol.Response {
-	// Reconcile before status to ensure we show accurate state
-	if err := d.forwarder.Reconcile(); err != nil {
-		d.logger.Warn("Failed to reconcile forwards before status", "error", err)
-	}
-
 	uptime := time.Since(d.startTime).Round(time.Second).String()
 
 	// Get all forwards and group by connection
@@ -332,11 +336,6 @@ func (d *Daemon) handleStatusCommand(req *protocol.Request) *protocol.Response {
 
 // handleListCommand handles the list forwards command
 func (d *Daemon) handleListCommand(req *protocol.Request) *protocol.Response {
-	// Reconcile before listing to ensure we show accurate state
-	if err := d.forwarder.Reconcile(); err != nil {
-		d.logger.Warn("Failed to reconcile forwards before listing", "error", err)
-	}
-
 	forwards := d.forwarder.ListForwards()
 
 	forwardInfos := make([]protocol.ForwardInfo, 0, len(forwards))

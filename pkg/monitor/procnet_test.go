@@ -75,3 +75,17 @@ func TestParseState(t *testing.T) {
 		}
 	}
 }
+
+func TestGetListeningPortsFromProcReturnsErrorWhenSocketTablesAreUnavailable(t *testing.T) {
+	missingDir := t.TempDir()
+	ports, err := getListeningPortsFromProc(
+		filepath.Join(missingDir, "tcp"),
+		filepath.Join(missingDir, "tcp6"),
+	)
+	if err == nil {
+		t.Fatal("getListeningPortsFromProc() expected an error")
+	}
+	if ports != nil {
+		t.Errorf("getListeningPortsFromProc() ports = %v, want nil", ports)
+	}
+}
