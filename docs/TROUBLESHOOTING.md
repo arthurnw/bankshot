@@ -4,7 +4,7 @@
 
 ### "Failed to connect to daemon"
 - Check daemon is running: `bankshot status` or `brew services list`
-- Verify socket exists: `ls -la ~/.bankshot.sock`
+- Verify the local socket exists: `ls -la ~/.bankshot.sock`
 - Check SSH forward: `ssh -O check yourserver`
 
 ### "Failed to forward port"
@@ -23,9 +23,25 @@ BANKSHOT_DEBUG=1 bankshot status  # Debug client
 ```
 
 ## Socket Issues
-If socket forwarding fails, ensure OpenSSH 6.7+ or use TCP mode:
+
+If several independent SSH transports connect to the same host, a remote Unix
+socket forward is vulnerable to one transport unlinking another's listener.
+On a trusted single-user remote host, a loopback TCP listener avoids that race:
+only one transport can bind the port, and the listener disappears cleanly when
+its owner exits.
+
+```sshconfig
+RemoteForward 127.0.0.1:61000 ~/.bankshot.sock
+```
+
 ```yaml
 # ~/.config/bankshot/config.yaml
 network: tcp
-address: 127.0.0.1:9999
+address: 127.0.0.1:61000
+monitor:
+  ignorePorts: [61000]
 ```
+
+Reserve the bridge port in `ignorePorts` so the monitor never tries to forward
+its own transport. A loopback TCP port is reachable by other users on the
+remote host, so prefer the Unix socket setup on shared systems.

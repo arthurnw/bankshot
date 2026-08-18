@@ -80,8 +80,9 @@ func (d *Monitor) Start(ctx context.Context) error {
 
 	// Create daemon client for sending forward requests
 	daemonClient := &localDaemonClient{
-		socketPath: d.config.Address,
-		logger:     d.logger,
+		network: d.config.Network,
+		address: d.config.Address,
+		logger:  d.logger,
 	}
 
 	// Generate session ID based on hostname (for SSH connection matching)
@@ -182,13 +183,14 @@ func (d *Monitor) Start(ctx context.Context) error {
 
 // localDaemonClient implements DaemonClient for sending requests to local daemon
 type localDaemonClient struct {
-	socketPath string
-	logger     *slog.Logger
+	network string
+	address string
+	logger  *slog.Logger
 }
 
 func (c *localDaemonClient) SendRequest(req *protocol.Request) (*protocol.Response, error) {
-	// Connect to daemon socket
-	conn, err := net.Dial("unix", c.socketPath)
+	// Connect to the daemon through the configured SSH-forwarded transport.
+	conn, err := net.Dial(c.network, c.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
 	}
@@ -333,8 +335,9 @@ func (d *Monitor) Reconcile() error {
 
 	// Create daemon client
 	daemonClient := &localDaemonClient{
-		socketPath: d.config.Address,
-		logger:     d.logger,
+		network: d.config.Network,
+		address: d.config.Address,
+		logger:  d.logger,
 	}
 
 	// Get hostname for connection matching
