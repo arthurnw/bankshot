@@ -67,6 +67,24 @@ func newStatusCmd() *cobra.Command {
 	return cmd
 }
 
+const monitorUnit = "bankshot-monitor.service"
+
+// monitorScope reports which systemctl scope owns the monitor unit. eBPF port
+// monitoring needs capabilities, and systemd can only hand those to a system
+// unit, so an eBPF install runs the monitor as a system service while a
+// polling install runs it as a user service. Look in both rather than assume.
+// Falling back to the user scope keeps an absent unit reporting as "not
+// running" rather than as an error.
+func monitorScope() string {
+	for _, scope := range []string{"--user", "--system"} {
+		out, err := exec.Command("systemctl", scope, "show", "-p", "LoadState", "--value", monitorUnit).Output()
+		if err == nil && strings.TrimSpace(string(out)) == "loaded" {
+			return scope
+		}
+	}
+	return "--user"
+}
+
 // showMonitorStatus displays the status of the bankshot-monitor systemd service
 func showMonitorStatus() error {
 	// Check if systemctl exists
@@ -74,8 +92,10 @@ func showMonitorStatus() error {
 		return fmt.Errorf("systemctl not available")
 	}
 
+	scope := monitorScope()
+
 	// Get bankshot-monitor service status
-	cmd := exec.Command("systemctl", "--user", "is-active", "bankshot-monitor")
+	cmd := exec.Command("systemctl", scope, "is-active", monitorUnit)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -84,7 +104,7 @@ func showMonitorStatus() error {
 	status := strings.TrimSpace(out.String())
 
 	// Get more detailed status
-	cmd = exec.Command("systemctl", "--user", "status", "bankshot-monitor", "--no-pager", "-n", "0")
+	cmd = exec.Command("systemctl", scope, "status", monitorUnit, "--no-pager", "-n", "0")
 	out.Reset()
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -142,7 +162,7 @@ func showMonitorStatus() error {
 	}
 
 	// Check for any active monitor sessions
-	cmd = exec.Command("systemctl", "--user", "list-units", "bankshot-monitor@*.service", "--no-legend", "--no-pager")
+	cmd = exec.Command("systemctl", scope, "list-units", "bankshot-monitor@*.service", "--no-legend", "--no-pager")
 	out.Reset()
 	cmd.Stdout = &out
 	if err := cmd.Run(); err == nil {

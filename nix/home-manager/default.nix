@@ -224,6 +224,20 @@ in {
         ~/.config/bankshot/config.yaml.
       '';
     };
+
+    generatedConfig = mkOption {
+      type = types.path;
+      readOnly = true;
+      default = configFile;
+      defaultText = literalExpression "<generated config file>";
+      description = ''
+        The rendered config file, in the store. Exposed so something outside
+        home-manager can be pointed at the settings this module already
+        renders instead of describing them a second time. NixOS hosts wire it
+        into services.bankshot.monitor.configFile, which both feeds the
+        monitor its config and makes a config change restart it.
+      '';
+    };
   };
 
   config = mkIf cfg.enable (let
