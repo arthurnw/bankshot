@@ -7,6 +7,7 @@ import (
 
 	"github.com/phinze/bankshot/pkg/config"
 	"github.com/phinze/bankshot/pkg/daemon"
+	"github.com/phinze/bankshot/pkg/logging"
 	"github.com/phinze/bankshot/version"
 	"github.com/spf13/cobra"
 )
@@ -22,6 +23,7 @@ func newRootCmd() *cobra.Command {
 	var (
 		configPath string
 		debug      bool
+		logFile    string
 	)
 
 	cmd := &cobra.Command{
@@ -32,15 +34,21 @@ from remote SSH sessions. It can open URLs in your local browser and
 manage SSH port forwards dynamically.`,
 		Version: version.GetFullVersion(),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Set up logging
-			logLevel := slog.LevelInfo
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
 			if debug {
-				logLevel = slog.LevelDebug
+				cfg.LogLevel = "debug"
+			}
+			if err := cfg.Validate(); err != nil {
+				return fmt.Errorf("invalid configuration: %w", err)
 			}
 
-			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-				Level: logLevel,
-			}))
+			logger, err := logging.New(logging.ParseLevel(cfg.LogLevel), logFile)
+			if err != nil {
+				return err
+			}
 			slog.SetDefault(logger)
 
 			slog.Info("Starting bankshot daemon",
@@ -48,22 +56,6 @@ manage SSH port forwards dynamically.`,
 				"commit", version.Commit,
 				"date", version.Date,
 			)
-
-			// Load configuration
-			cfg, err := config.Load(configPath)
-			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Override log level if debug flag is set
-			if debug {
-				cfg.LogLevel = "debug"
-			}
-
-			// Validate configuration
-			if err := cfg.Validate(); err != nil {
-				return fmt.Errorf("invalid configuration: %w", err)
-			}
 
 			// Create and run daemon
 			d := daemon.New(cfg, logger)
@@ -73,6 +65,7 @@ manage SSH port forwards dynamically.`,
 
 	cmd.Flags().StringVar(&configPath, "config", "", "Path to configuration file (default: ~/.config/bankshot/config.yaml)")
 	cmd.Flags().BoolVar(&debug, "debug", false, "Enable debug logging")
+	cmd.Flags().StringVar(&logFile, "log-file", "", "Write logs to this file, rotated at 10 MiB, instead of stderr")
 
 	return cmd
 }

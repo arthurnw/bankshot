@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/phinze/bankshot/pkg/config"
+	"github.com/phinze/bankshot/pkg/logging"
 	"github.com/phinze/bankshot/pkg/monitor"
 	"github.com/phinze/bankshot/pkg/protocol"
 )
@@ -27,24 +28,10 @@ type Monitor struct {
 
 // NewMonitor creates a new monitor instance
 func NewMonitor(cfg Config) (*Monitor, error) {
-	// Set up logger
-	var logLevel slog.Level
-	switch cfg.LogLevel {
-	case "debug":
-		logLevel = slog.LevelDebug
-	case "info":
-		logLevel = slog.LevelInfo
-	case "warn":
-		logLevel = slog.LevelWarn
-	case "error":
-		logLevel = slog.LevelError
-	default:
-		logLevel = slog.LevelInfo
+	logger, err := logging.New(logging.ParseLevel(cfg.LogLevel), cfg.LogFile)
+	if err != nil {
+		return nil, err
 	}
-
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: logLevel,
-	}))
 
 	// Load bankshot config for monitor settings
 	bankshotConfig, err := config.Load("")

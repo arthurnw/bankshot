@@ -12,6 +12,7 @@ type Config struct {
 	SystemdMode bool   // Run in systemd mode with sd_notify support
 	LogLevel    string // Log level (debug, info, warn, error)
 	PIDFile     string // Path to PID file (optional)
+	LogFile     string // Log file, rotated at 10 MiB (optional; default stderr)
 }
 
 // NewWithConfig creates a new daemon with custom configuration

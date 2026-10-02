@@ -14,6 +14,7 @@ import (
 var (
 	systemdMode bool
 	logLevel    string
+	logFile     string
 	pidFile     string
 )
 
@@ -49,6 +50,7 @@ func newMonitorRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&systemdMode, "systemd", false, "Run in systemd mode with sd_notify support")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
 	cmd.Flags().StringVar(&pidFile, "pid-file", "", "Path to PID file")
+	cmd.Flags().StringVar(&logFile, "log-file", "", "Write logs to this file, rotated at 10 MiB, instead of stderr")
 
 	return cmd
 }
@@ -59,6 +61,7 @@ func runMonitor(cmd *cobra.Command, args []string) error {
 		SystemdMode: systemdMode,
 		LogLevel:    logLevel,
 		PIDFile:     pidFile,
+		LogFile:     logFile,
 	}
 
 	// Create and initialize monitor
