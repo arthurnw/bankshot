@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 
 	"github.com/google/uuid"
@@ -18,9 +19,11 @@ func newOpenCmd() *cobra.Command {
 	var noForward bool
 
 	cmd := &cobra.Command{
-		Use:   "open [url]",
+		Use:   "open <url|port>",
 		Short: "Open a URL in the local browser",
-		Long: `Opens the specified URL in the default browser on the local machine.
+		Long: `Opens the specified URL in the default browser on the local machine. A bare
+port means http://localhost:<port>, and a loopback address without a scheme,
+such as localhost:3000/app, gets http://.
 
 Before opening, any loopback port the URL points at, directly or through an
 OAuth redirect_uri parameter, is forwarded if something on this machine is
@@ -28,7 +31,7 @@ listening on it. A CLI login flow starts its callback listener before it opens
 the browser, so the forward exists before the provider redirects back.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rawURL := args[0]
+			rawURL := normalizeOpenURL(args[0])
 
 			if !noForward {
 				forwardOpenedPorts(rawURL)
@@ -65,6 +68,36 @@ the browser, so the forward exists before the provider redirects back.`,
 	cmd.Flags().BoolVar(&noForward, "no-forward", false, "Do not forward loopback ports referenced by the URL")
 
 	return cmd
+}
+
+var schemelessLoopback = regexp.MustCompile(`^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0|\[::\])(:[0-9]+)?([/?#].*)?$`)
+
+// normalizeOpenURL turns a bare port or a scheme-less loopback address into an
+// http URL, since the local opener rejects "localhost:3000", which parses as a
+// URL with scheme "localhost". It also rewrites a wildcard host, as printed by
+// servers bound to all interfaces, to localhost, which browsers can reach.
+// Other input passes through unchanged.
+func normalizeOpenURL(raw string) string {
+	if port, err := strconv.Atoi(raw); err == nil && port > 0 && port <= 65535 {
+		return fmt.Sprintf("http://localhost:%d", port)
+	}
+	if schemelessLoopback.MatchString(raw) {
+		raw = "http://" + raw
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return raw
+	}
+	if host := u.Hostname(); host == "0.0.0.0" || host == "::" {
+		if port := u.Port(); port != "" {
+			u.Host = "localhost:" + port
+		} else {
+			u.Host = "localhost"
+		}
+		return u.String()
+	}
+	return raw
 }
 
 // forwardOpenedPorts forwards the listening loopback ports referenced by rawURL.

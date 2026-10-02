@@ -57,3 +57,29 @@ func TestListeningPorts(t *testing.T) {
 		t.Errorf("listeningPorts() = %v, want %v", got, want)
 	}
 }
+
+func TestNormalizeOpenURL(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"3000", "http://localhost:3000"},
+		{"localhost:18702", "http://localhost:18702"},
+		{"localhost:3000/app?x=1", "http://localhost:3000/app?x=1"},
+		{"127.0.0.1:8080", "http://127.0.0.1:8080"},
+		{"[::1]:8080/", "http://[::1]:8080/"},
+		{"0.0.0.0:5173", "http://localhost:5173"},
+		{"http://0.0.0.0:5173/app?x=1", "http://localhost:5173/app?x=1"},
+		{"http://[::]:8000/", "http://localhost:8000/"},
+		{"https://0.0.0.0", "https://localhost"},
+		{"localhost", "http://localhost"},
+		{"http://localhost:3000", "http://localhost:3000"},
+		{"https://github.com", "https://github.com"},
+		{"about:blank", "about:blank"},
+		{"mailto:a@example.com", "mailto:a@example.com"},
+		{"localhostfoo:3000", "localhostfoo:3000"},
+		{"70000", "70000"},
+	}
+	for _, tt := range tests {
+		if got := normalizeOpenURL(tt.in); got != tt.want {
+			t.Errorf("normalizeOpenURL(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
