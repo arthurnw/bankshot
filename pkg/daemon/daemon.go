@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -384,6 +385,9 @@ func (d *Daemon) handleForwardCommand(req *protocol.Request) *protocol.Response 
 	// Add forward
 	created, err := d.forwarder.AddForward(socketPath, forwardReq.ConnectionInfo, forwardReq.RemotePort, forwardReq.LocalPort, forwardReq.Host)
 	if err != nil {
+		if conflict, ok := portConflict(err); ok {
+			d.notifier.NotifyPortsInUse(forwardReq.ConnectionInfo, []notify.PortConflict{conflict})
+		}
 		return protocol.NewErrorResponse(req.ID, err)
 	}
 
@@ -436,6 +440,7 @@ func (d *Daemon) handleForwardBatchCommand(req *protocol.Request) *protocol.Resp
 
 	results := make([]protocol.BatchForwardResult, 0, len(batchReq.Forwards))
 	var created []notify.ForwardEvent
+	var conflicts []notify.PortConflict
 
 	for _, fwd := range batchReq.Forwards {
 		host := fwd.Host
@@ -459,6 +464,9 @@ func (d *Daemon) handleForwardBatchCommand(req *protocol.Request) *protocol.Resp
 				"port", fwd.RemotePort,
 				"connectionInfo", batchReq.ConnectionInfo,
 				"error", err)
+			if conflict, ok := portConflict(err); ok {
+				conflicts = append(conflicts, conflict)
+			}
 		} else if wasCreated {
 			created = append(created, notify.ForwardEvent{
 				RemotePort:  fwd.RemotePort,
@@ -475,12 +483,21 @@ func (d *Daemon) handleForwardBatchCommand(req *protocol.Request) *protocol.Resp
 	if len(created) > 0 {
 		d.notifier.NotifyForwards(batchReq.ConnectionInfo, created)
 	}
+	d.notifier.NotifyPortsInUse(batchReq.ConnectionInfo, conflicts)
 
 	resp, err := protocol.NewSuccessResponse(req.ID, protocol.BatchForwardResponse{Results: results})
 	if err != nil {
 		return protocol.NewErrorResponse(req.ID, err)
 	}
 	return resp
+}
+
+func portConflict(err error) (notify.PortConflict, bool) {
+	var inUse *forwarder.PortInUseError
+	if !errors.As(err, &inUse) {
+		return notify.PortConflict{}, false
+	}
+	return notify.PortConflict{Port: inUse.Port, Command: inUse.Command}, true
 }
 
 // handleUnforwardCommand handles the port unforward command

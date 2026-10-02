@@ -12,3 +12,8 @@ import (
 func GetListeningPorts() ([]Port, error) {
 	return nil, fmt.Errorf("system-wide listener discovery is unsupported on %s", runtime.GOOS)
 }
+
+// PortListeners is unsupported on this platform.
+func PortListeners(port int) ([]Listener, error) {
+	return nil, ErrListenersUnsupported
+}

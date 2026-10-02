@@ -123,6 +123,69 @@ func formatForwardRollup(connectionInfo string, events []ForwardEvent) (title, b
 	return title, body
 }
 
+// PortConflict describes a forward skipped because a local process already
+// listens on its port.
+type PortConflict struct {
+	Port    int
+	Command string
+}
+
+// NotifyPortsInUse posts one notification for forwards skipped because their
+// local ports are taken.
+func (n *Notifier) NotifyPortsInUse(connectionInfo string, conflicts []PortConflict) {
+	if n.helperPath == "" || len(conflicts) == 0 {
+		return
+	}
+
+	title, body := formatPortsInUse(connectionInfo, conflicts)
+	n.logger.Info("Sending port conflict notification",
+		"title", title,
+		"conflicts", len(conflicts),
+		"helper", n.helperPath,
+	)
+	n.send("--title", title, "--body", body)
+}
+
+func formatPortsInUse(connectionInfo string, conflicts []PortConflict) (title, body string) {
+	sorted := make([]PortConflict, len(conflicts))
+	copy(sorted, conflicts)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Port < sorted[j].Port
+	})
+
+	remote := "the remote"
+	if connectionInfo != "" {
+		remote = connectionInfo
+	}
+
+	if len(sorted) == 1 {
+		c := sorted[0]
+		title = fmt.Sprintf("Port %d not forwarded", c.Port)
+		body = fmt.Sprintf("In use on this machine by %s. Move the service on %s to another port.",
+			processLabel(c.Command), remote)
+		return title, body
+	}
+
+	title = fmt.Sprintf("%d ports not forwarded from %s", len(sorted), remote)
+	parts := make([]string, 0, len(sorted))
+	for _, c := range sorted {
+		parts = append(parts, fmt.Sprintf("%d (%s)", c.Port, processLabel(c.Command)))
+	}
+	if len(parts) > rollupPortLimit {
+		extra := len(parts) - rollupPortLimit
+		parts = append(parts[:rollupPortLimit], fmt.Sprintf("+%d more", extra))
+	}
+	body = "In use on this machine: " + strings.Join(parts, ", ")
+	return title, body
+}
+
+func processLabel(command string) string {
+	if command == "" {
+		return "another process"
+	}
+	return command
+}
+
 // NotifyOpProxy posts a notification for a proxied 1Password CLI request.
 func (n *Notifier) NotifyOpProxy(args []string) {
 	if n.helperPath == "" {

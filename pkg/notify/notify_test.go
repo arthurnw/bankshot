@@ -87,3 +87,21 @@ func TestNonexistentBinary(t *testing.T) {
 	// Should not panic; the goroutine logs a warning but doesn't block.
 	n.NotifyForward(8080, 8080, "localhost", "", "")
 }
+
+func TestFormatPortsInUse(t *testing.T) {
+	title, body := formatPortsInUse("mini", []PortConflict{{Port: 5000, Command: "ControlCenter"}})
+	if title != "Port 5000 not forwarded" {
+		t.Errorf("title = %q", title)
+	}
+	if body != "In use on this machine by ControlCenter. Move the service on mini to another port." {
+		t.Errorf("body = %q", body)
+	}
+
+	title, body = formatPortsInUse("mini", []PortConflict{{Port: 7000, Command: "ControlCenter"}, {Port: 5000}})
+	if title != "2 ports not forwarded from mini" {
+		t.Errorf("rollup title = %q", title)
+	}
+	if body != "In use on this machine: 5000 (another process), 7000 (ControlCenter)" {
+		t.Errorf("rollup body = %q", body)
+	}
+}

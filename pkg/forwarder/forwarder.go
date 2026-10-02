@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,15 +29,35 @@ type Forwarder struct {
 	sshCmd   string
 	forwards map[string]*Forward // key: "host:remotePort"
 	mu       sync.RWMutex
+
+	// Replaceable in tests.
+	portListeners func(port int) ([]monitor.Listener, error)
+	masterPID     func(connectionInfo string) (int, error)
+}
+
+// PortInUseError reports that a local process other than the connection's
+// ControlMaster already listens on the port a forward would bind. Forwarding
+// anyway would shadow that service on some or all loopback addresses.
+type PortInUseError struct {
+	Port    int
+	PID     int
+	Command string
+}
+
+func (e *PortInUseError) Error() string {
+	return fmt.Sprintf("local port %d is in use by %s (pid %d)", e.Port, e.Command, e.PID)
 }
 
 // New creates a new Forwarder
 func New(logger *slog.Logger, sshCmd string) *Forwarder {
-	return &Forwarder{
-		logger:   logger,
-		sshCmd:   sshCmd,
-		forwards: make(map[string]*Forward),
+	f := &Forwarder{
+		logger:        logger,
+		sshCmd:        sshCmd,
+		forwards:      make(map[string]*Forward),
+		portListeners: monitor.PortListeners,
 	}
+	f.masterPID = f.controlMasterPID
+	return f
 }
 
 // AddForward creates a new port forward.
@@ -64,6 +85,19 @@ func (f *Forwarder) AddForward(socketPath string, connectionInfo string, remoteP
 		return false, nil
 	}
 	f.mu.RUnlock()
+
+	existing, err := f.checkLocalPort(connectionInfo, localPort)
+	if err != nil {
+		f.logger.Warn("Not forwarding: local port in use",
+			"remote", fmt.Sprintf("%s:%d", host, remotePort),
+			"local", localPort,
+			"error", err,
+		)
+		return false, err
+	}
+	if existing {
+		return false, f.RegisterExistingForward(socketPath, connectionInfo, remotePort, localPort, host)
+	}
 
 	// Execute SSH forward command
 	cmd := exec.Command(f.sshCmd,
@@ -105,6 +139,60 @@ func (f *Forwarder) AddForward(socketPath string, connectionInfo string, remoteP
 	)
 
 	return true, nil
+}
+
+// checkLocalPort looks for loopback listeners on localPort. It returns a
+// *PortInUseError when another process holds the port, and existing=true when
+// only the connection's ControlMaster does: that is an earlier forward that
+// outlived a daemon restart. When listener processes cannot be determined, it
+// reports no conflict and leaves the outcome to ssh.
+func (f *Forwarder) checkLocalPort(connectionInfo string, localPort int) (existing bool, err error) {
+	listeners, lookupErr := f.portListeners(localPort)
+	if lookupErr != nil {
+		f.logger.Debug("Skipping local port check", "port", localPort, "error", lookupErr)
+		return false, nil
+	}
+
+	var local []monitor.Listener
+	for _, l := range listeners {
+		if monitor.IsLocalAddr(l.BindAddr) {
+			local = append(local, l)
+		}
+	}
+	if len(local) == 0 {
+		return false, nil
+	}
+
+	masterPID, pidErr := f.masterPID(connectionInfo)
+	for _, l := range local {
+		if pidErr != nil || l.PID != masterPID {
+			return false, &PortInUseError{Port: localPort, PID: l.PID, Command: l.Command}
+		}
+	}
+	return true, nil
+}
+
+// controlMasterPID returns the PID of the ControlMaster for connectionInfo,
+// parsed from `ssh -O check`, which prints "Master running (pid=N)".
+func (f *Forwarder) controlMasterPID(connectionInfo string) (int, error) {
+	output, err := exec.Command(f.sshCmd, "-O", "check", connectionInfo).CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("ssh -O check %s: %w", connectionInfo, err)
+	}
+	return parseMasterPID(string(output))
+}
+
+func parseMasterPID(output string) (int, error) {
+	_, rest, ok := strings.Cut(output, "pid=")
+	if !ok {
+		return 0, fmt.Errorf("no pid in ssh -O check output %q", output)
+	}
+	digits, _, _ := strings.Cut(rest, ")")
+	pid, err := strconv.Atoi(digits)
+	if err != nil {
+		return 0, fmt.Errorf("parse ssh -O check pid %q: %w", digits, err)
+	}
+	return pid, nil
 }
 
 // RegisterExistingForward registers a forward that already exists (e.g., discovered on startup)
