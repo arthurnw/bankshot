@@ -26,7 +26,15 @@ type Forward struct {
 	// discovered marks a forward found by startup discovery whose
 	// ConnectionInfo is a placeholder derived from the control socket name.
 	discovered bool
+	// deadSince records when reconciliation first found the forward's
+	// connection dead. Zero while the connection is alive.
+	deadSince time.Time
 }
+
+// deadConnectionGrace is how long a connection must stay dead before its
+// forwards are dropped. A ControlMaster that reconnects within this window
+// keeps its forwards tracked, so reconciliation re-establishes them.
+const deadConnectionGrace = 2 * time.Minute
 
 // Forwarder manages SSH port forwards
 type Forwarder struct {
@@ -175,6 +183,22 @@ func (f *Forwarder) checkLocalPort(connectionInfo string, localPort int) (existi
 		}
 	}
 	return true, nil
+}
+
+// deadPastGrace records that key's connection is dead and reports whether it
+// has been dead for longer than deadConnectionGrace.
+func (f *Forwarder) deadPastGrace(key string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fwd, ok := f.forwards[key]
+	if !ok {
+		return false
+	}
+	if fwd.deadSince.IsZero() {
+		fwd.deadSince = time.Now()
+		return false
+	}
+	return time.Since(fwd.deadSince) >= deadConnectionGrace
 }
 
 // controlMasterPID returns the PID of the ControlMaster for connectionInfo,
@@ -520,6 +544,17 @@ func (f *Forwarder) ListConnectionForwards(connectionInfo string) []*Forward {
 // SSH connection is still alive, or removes them if the connection is dead.
 // This helps recover from SSH reconnections that tear down port forwards.
 func (f *Forwarder) Reconcile() error {
+	return f.reconcile(func(*Forward) bool { return true })
+}
+
+// ReconcileConnection reconciles only the forwards of connectionInfo. A remote
+// calls it after reconnecting, when the forwards bound by the previous
+// ControlMaster have died with it.
+func (f *Forwarder) ReconcileConnection(connectionInfo string) error {
+	return f.reconcile(func(fwd *Forward) bool { return fwd.ConnectionInfo == connectionInfo })
+}
+
+func (f *Forwarder) reconcile(include func(*Forward) bool) error {
 	// Get all listening ports on the system
 	listeningPorts, err := monitor.GetListeningPorts()
 	if err != nil {
@@ -536,7 +571,7 @@ func (f *Forwarder) Reconcile() error {
 	f.mu.RLock()
 	var staleForwards []*Forward
 	for _, fwd := range f.forwards {
-		if !portSet[fwd.LocalPort] {
+		if include(fwd) && !portSet[fwd.LocalPort] {
 			// Make a copy to avoid holding the lock during SSH operations
 			fwdCopy := *fwd
 			staleForwards = append(staleForwards, &fwdCopy)
@@ -561,20 +596,33 @@ func (f *Forwarder) Reconcile() error {
 		)
 
 		// Check if SSH connection is still alive
+		key := fmt.Sprintf("%s:%s:%d", fwd.ConnectionInfo, fwd.Host, fwd.RemotePort)
 		socketPath, err := FindControlSocket(fwd.ConnectionInfo)
 		if err != nil {
-			// Connection is dead, mark for removal
+			if !f.deadPastGrace(key) {
+				f.logger.Debug("SSH connection down; keeping forward for now",
+					"connectionInfo", fwd.ConnectionInfo,
+					"localPort", fwd.LocalPort,
+					"error", err,
+				)
+				continue
+			}
 			f.logger.Info("Removing stale forward (SSH connection dead)",
 				"connectionInfo", fwd.ConnectionInfo,
 				"remotePort", fwd.RemotePort,
 				"localPort", fwd.LocalPort,
 				"error", err,
 			)
-			key := fmt.Sprintf("%s:%s:%d", fwd.ConnectionInfo, fwd.Host, fwd.RemotePort)
 			toRemove = append(toRemove, key)
 			removed++
 			continue
 		}
+
+		f.mu.Lock()
+		if existing, ok := f.forwards[key]; ok {
+			existing.deadSince = time.Time{}
+		}
+		f.mu.Unlock()
 
 		// SSH connection is alive, try to re-establish the forward
 		f.logger.Info("Re-establishing forward (SSH connection alive)",
@@ -605,10 +653,10 @@ func (f *Forwarder) Reconcile() error {
 
 		// Update the forward with current info
 		f.mu.Lock()
-		key := fmt.Sprintf("%s:%s:%d", fwd.ConnectionInfo, fwd.Host, fwd.RemotePort)
 		if existing, ok := f.forwards[key]; ok {
 			existing.SocketPath = socketPath
 			existing.CreatedAt = time.Now()
+			existing.deadSince = time.Time{}
 		}
 		f.mu.Unlock()
 

@@ -349,6 +349,11 @@ func (d *Daemon) handleListCommand(req *protocol.Request) *protocol.Response {
 		} else {
 			d.logger.Debug("Not claiming discovered forwards", "connectionInfo", listReq.ConnectionInfo, "error", err)
 		}
+		// A monitor lists after it reconnects. Forwards bound by the previous
+		// ControlMaster died with it, so re-establish them before reporting.
+		if err := d.forwarder.ReconcileConnection(listReq.ConnectionInfo); err != nil {
+			d.logger.Warn("Failed to reconcile forwards before listing", "connectionInfo", listReq.ConnectionInfo, "error", err)
+		}
 	}
 
 	forwards := d.forwarder.ListForwards()
@@ -756,7 +761,10 @@ func (d *Daemon) autoDiscoverForwards() error {
 func (d *Daemon) reconcileLoop() {
 	defer d.wg.Done()
 
-	ticker := time.NewTicker(10 * time.Minute)
+	// A ControlMaster can die and come back between two of the monitor's
+	// connectivity probes, so the monitor never reconciles. This loop repairs
+	// those forwards. A healthy pass runs one listener scan and no ssh.
+	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
 	for {
