@@ -348,9 +348,16 @@ func (d *Monitor) Reconcile() error {
 	sessionID := hostname
 
 	// Query daemon for existing forwards
+	// Naming the connection lets the daemon attach forwards it found at
+	// startup to this session, so stale ones are unforwarded below.
+	listPayload, err := json.Marshal(protocol.ListRequest{ConnectionInfo: sessionID})
+	if err != nil {
+		return fmt.Errorf("failed to marshal list request: %w", err)
+	}
 	listReq := &protocol.Request{
-		ID:   "reconcile-" + fmt.Sprintf("%d", time.Now().Unix()),
-		Type: protocol.CommandList,
+		ID:      "reconcile-" + fmt.Sprintf("%d", time.Now().Unix()),
+		Type:    protocol.CommandList,
+		Payload: listPayload,
 	}
 
 	listResp, err := daemonClient.SendRequest(listReq)

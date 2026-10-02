@@ -337,6 +337,20 @@ func (d *Daemon) handleStatusCommand(req *protocol.Request) *protocol.Response {
 
 // handleListCommand handles the list forwards command
 func (d *Daemon) handleListCommand(req *protocol.Request) *protocol.Response {
+	var listReq protocol.ListRequest
+	if len(req.Payload) > 0 {
+		if err := json.Unmarshal(req.Payload, &listReq); err != nil {
+			return protocol.NewErrorResponse(req.ID, fmt.Errorf("invalid list request format: %w", err))
+		}
+	}
+	if listReq.ConnectionInfo != "" {
+		if socketPath, err := forwarder.FindControlSocket(listReq.ConnectionInfo); err == nil {
+			d.forwarder.ClaimDiscovered(socketPath, listReq.ConnectionInfo)
+		} else {
+			d.logger.Debug("Not claiming discovered forwards", "connectionInfo", listReq.ConnectionInfo, "error", err)
+		}
+	}
+
 	forwards := d.forwarder.ListForwards()
 
 	forwardInfos := make([]protocol.ForwardInfo, 0, len(forwards))
@@ -381,6 +395,7 @@ func (d *Daemon) handleForwardCommand(req *protocol.Request) *protocol.Response 
 			return protocol.NewErrorResponse(req.ID, fmt.Errorf("failed to find SSH socket: %w", err))
 		}
 	}
+	d.forwarder.ClaimDiscovered(socketPath, forwardReq.ConnectionInfo)
 
 	// Add forward
 	created, err := d.forwarder.AddForward(socketPath, forwardReq.ConnectionInfo, forwardReq.RemotePort, forwardReq.LocalPort, forwardReq.Host)
@@ -437,6 +452,7 @@ func (d *Daemon) handleForwardBatchCommand(req *protocol.Request) *protocol.Resp
 			return protocol.NewErrorResponse(req.ID, fmt.Errorf("failed to find SSH socket: %w", err))
 		}
 	}
+	d.forwarder.ClaimDiscovered(socketPath, batchReq.ConnectionInfo)
 
 	results := make([]protocol.BatchForwardResult, 0, len(batchReq.Forwards))
 	var created []notify.ForwardEvent
@@ -711,7 +727,7 @@ func (d *Daemon) autoDiscoverForwards() error {
 		// Register the forward in our forwarder (without executing SSH command)
 		// Note: We're assuming the remote port is the same as local port
 		// This might not always be accurate, but it's a reasonable default
-		err := d.forwarder.RegisterExistingForward(
+		err := d.forwarder.RegisterDiscoveredForward(
 			fwd.SocketPath,
 			fwd.ConnectionInfo,
 			fwd.RemotePort,

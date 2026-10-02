@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,10 @@ type Forward struct {
 	SocketPath     string
 	ConnectionInfo string // SSH connection target (e.g., hostname)
 	CreatedAt      time.Time
+
+	// discovered marks a forward found by startup discovery whose
+	// ConnectionInfo is a placeholder derived from the control socket name.
+	discovered bool
 }
 
 // Forwarder manages SSH port forwards
@@ -195,8 +200,68 @@ func parseMasterPID(output string) (int, error) {
 	return pid, nil
 }
 
-// RegisterExistingForward registers a forward that already exists (e.g., discovered on startup)
+// RegisterExistingForward registers a forward that already exists under a
+// known connection name, without running ssh.
 func (f *Forwarder) RegisterExistingForward(socketPath string, connectionInfo string, remotePort, localPort int, host string) error {
+	return f.registerExisting(socketPath, connectionInfo, remotePort, localPort, host, false)
+}
+
+// RegisterDiscoveredForward registers a forward found by startup discovery.
+// Discovery sees only the control socket, so connectionInfo is a placeholder
+// until ClaimDiscovered renames the forward.
+func (f *Forwarder) RegisterDiscoveredForward(socketPath string, connectionInfo string, remotePort, localPort int, host string) error {
+	return f.registerExisting(socketPath, connectionInfo, remotePort, localPort, host, true)
+}
+
+// ClaimDiscovered renames discovered forwards on socketPath to connectionInfo,
+// the name the remote uses for that connection. Without this, a forward found
+// at startup and the remote's later request for it are tracked twice, and the
+// discovered copy is never reconciled because its name matches no remote.
+// It returns the number of forwards claimed.
+func (f *Forwarder) ClaimDiscovered(socketPath, connectionInfo string) int {
+	if socketPath == "" || connectionInfo == "" {
+		return 0
+	}
+	want := canonicalSocketPath(socketPath)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	claimed := 0
+	for key, fwd := range f.forwards {
+		if !fwd.discovered || canonicalSocketPath(fwd.SocketPath) != want {
+			continue
+		}
+		delete(f.forwards, key)
+		claimed++
+
+		newKey := fmt.Sprintf("%s:%s:%d", connectionInfo, fwd.Host, fwd.RemotePort)
+		if _, exists := f.forwards[newKey]; exists {
+			continue
+		}
+		fwd.ConnectionInfo = connectionInfo
+		fwd.discovered = false
+		f.forwards[newKey] = fwd
+	}
+
+	if claimed > 0 {
+		f.logger.Info("Claimed discovered forwards",
+			"connectionInfo", connectionInfo,
+			"socketPath", socketPath,
+			"count", claimed,
+		)
+	}
+	return claimed
+}
+
+func canonicalSocketPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return filepath.Clean(path)
+}
+
+func (f *Forwarder) registerExisting(socketPath string, connectionInfo string, remotePort, localPort int, host string, discovered bool) error {
 	if host == "" {
 		host = "localhost"
 	}
@@ -227,6 +292,7 @@ func (f *Forwarder) RegisterExistingForward(socketPath string, connectionInfo st
 		SocketPath:     socketPath,
 		ConnectionInfo: connectionInfo,
 		CreatedAt:      time.Now(),
+		discovered:     discovered,
 	}
 
 	f.mu.Lock()

@@ -123,6 +123,13 @@ type ConnectionStatus struct {
 	LastActivity   string `json:"last_activity"`
 }
 
+// ListRequest is the optional payload of a list command. A monitor names its
+// connection so the daemon can attach forwards found at startup to it before
+// listing.
+type ListRequest struct {
+	ConnectionInfo string `json:"connection_info,omitempty"`
+}
+
 // ListResponse represents list of active forwards
 type ListResponse struct {
 	Forwards []ForwardInfo `json:"forwards"`
