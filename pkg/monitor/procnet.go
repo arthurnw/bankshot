@@ -170,11 +170,11 @@ func IsLocalAddr(addr string) bool {
 	return false
 }
 
-// ResolveProcessName returns the process name for a given PID.
+// procProcessName returns the process name for a given PID.
 // It reads /proc/<pid>/cmdline first to get the full (untruncated) argv[0]
 // basename, falling back to /proc/<pid>/comm (which the kernel truncates
 // to 15 characters). Returns empty string if the process is gone or unreadable.
-func ResolveProcessName(pid int) string {
+func procProcessName(pid int) string {
 	// Try cmdline first for the full name
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err == nil && len(data) > 0 {
@@ -195,9 +195,9 @@ func ResolveProcessName(pid int) string {
 	return strings.TrimSpace(string(data))
 }
 
-// ResolveParentPID returns the parent PID for a given PID by reading PPid from
+// procParentPID returns the parent PID for a given PID by reading PPid from
 // /proc/<pid>/status. Returns 0 if the process is gone, unreadable, or at init.
-func ResolveParentPID(pid int) int {
+func procParentPID(pid int) int {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
 	if err != nil {
 		return 0
@@ -217,9 +217,9 @@ func ResolveParentPID(pid int) int {
 	return 0
 }
 
-// ResolveProcessCwd reads /proc/<pid>/cwd symlink and returns the working directory.
+// procProcessCwd reads /proc/<pid>/cwd symlink and returns the working directory.
 // Returns empty string if the process is gone or unreadable.
-func ResolveProcessCwd(pid int) string {
+func procProcessCwd(pid int) string {
 	cwd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
 	if err != nil {
 		return ""
