@@ -96,14 +96,12 @@ func (d *Daemon) Run() error {
 			return fmt.Errorf("failed to create socket directory: %w", err)
 		}
 
-		// Verify directory permissions
-		if info, err := os.Stat(socketDir); err == nil {
-			mode := info.Mode()
-			if mode.Perm()&0077 != 0 {
-				d.logger.Warn("Socket directory has weak permissions",
-					"path", socketDir,
-					"mode", mode.Perm())
-			}
+		// The umask makes the socket 0600, so others reading the directory is
+		// harmless. Others writing to it could replace the socket.
+		if info, err := os.Stat(socketDir); err == nil && socketDirWritableByOthers(info.Mode()) {
+			d.logger.Warn("Socket directory is writable by other users",
+				"path", socketDir,
+				"mode", info.Mode().Perm())
 		}
 	}
 
@@ -263,6 +261,10 @@ func (d *Daemon) handleCommand(req *protocol.Request) *protocol.Response {
 	default:
 		return protocol.NewErrorResponse(req.ID, fmt.Errorf("unknown command type: %s", req.Type))
 	}
+}
+
+func socketDirWritableByOthers(mode os.FileMode) bool {
+	return mode.Perm()&0o022 != 0
 }
 
 func isConnectivityProbe(req *protocol.Request) bool {

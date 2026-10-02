@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"testing"
 
 	"github.com/phinze/bankshot/pkg/protocol"
@@ -35,5 +36,23 @@ func TestIsConnectivityProbe(t *testing.T) {
 				t.Errorf("isConnectivityProbe() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSocketDirWritableByOthers(t *testing.T) {
+	tests := []struct {
+		mode os.FileMode
+		want bool
+	}{
+		{0o700, false},
+		{0o750, false}, // macOS home directories
+		{0o755, false},
+		{0o770, true},
+		{0o1777, true}, // /tmp
+	}
+	for _, tt := range tests {
+		if got := socketDirWritableByOthers(tt.mode); got != tt.want {
+			t.Errorf("socketDirWritableByOthers(%o) = %v, want %v", tt.mode, got, tt.want)
+		}
 	}
 }
