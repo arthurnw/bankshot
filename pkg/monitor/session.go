@@ -488,10 +488,30 @@ func (m *SessionMonitor) shouldForwardPort(port int, bindAddr string) bool {
 	return ShouldForwardPort(port, bindAddr, m.portRanges, m.ignorePorts)
 }
 
+// sessionRoots are processes that start login sessions or services. Every
+// process in an OpenSSH session descends from sshd, so matching ancestors past
+// one would make the default "sshd" entry ignore every port opened from a
+// shell. login covers Tailscale SSH, whose shells run under /usr/bin/login.
+var sessionRoots = []string{"sshd", "login", "systemd", "launchd", "init"}
+
+// isSessionRoot reports whether name is a session root, including the forms
+// sshd gives its session processes: "sshd-session", "sshd: user [priv]", and
+// "sshd: user@pts/0" (whose basename is "0", so the walk passes it and stops
+// at the [priv] process above it).
+func isSessionRoot(name string) bool {
+	for _, root := range sessionRoots {
+		if name == root || strings.HasPrefix(name, root+"-") || strings.HasPrefix(name, root+":") {
+			return true
+		}
+	}
+	return false
+}
+
 // shouldIgnoreProcess checks if the process or any of its ancestors match an
 // ignoreProcesses entry. It first checks the given name, then walks the process
 // tree upward via resolveParentPID, resolving each ancestor's name and checking
-// against the matchers. Stops at PID <= 1 or after 16 levels.
+// against the matchers. Stops at PID <= 1, at a session root, or after 16
+// levels.
 func (m *SessionMonitor) shouldIgnoreProcess(pid int, name string) (bool, string) {
 	// Check the process itself first
 	for _, pm := range m.processMatchers {
@@ -508,7 +528,7 @@ func (m *SessionMonitor) shouldIgnoreProcess(pid int, name string) (bool, string
 			break
 		}
 		parentName := m.resolveProcessName(parentPID)
-		if parentName == "" {
+		if parentName == "" || isSessionRoot(parentName) {
 			break
 		}
 		for _, pm := range m.processMatchers {

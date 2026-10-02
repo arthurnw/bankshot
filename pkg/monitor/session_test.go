@@ -472,3 +472,63 @@ func TestHandlePortEvent_IgnoreProcesses(t *testing.T) {
 		})
 	}
 }
+
+func TestHandlePortEvent_AncestorWalkStopsAtSessionRoot(t *testing.T) {
+	// Chains as seen on real hosts. Linux sshd retitles its session processes,
+	// so their resolved names are "0" (from "sshd: anw@pts/0") and
+	// "sshd: anw [priv]".
+	nameMap := map[int]string{
+		100: "node", 101: "zsh", 102: "sshd-session", 103: "sshd", // macOS ssh shell
+		200: "node", 201: "bash", 202: "0", 203: "sshd: anw [priv]", 204: "sshd", // Linux ssh shell
+		300: "nc", 301: "pkg.test", 302: "zsh", 303: "sshd-session", // test child in an ssh shell
+		400: "sshd",                  // sshd's own listener
+		500: "node", 501: "systemd", // systemd user service
+		600: "node", 601: "zsh", 602: "login", 603: "tailscaled", // Tailscale SSH shell
+	}
+	parentMap := map[int]int{
+		100: 101, 101: 102, 102: 103, 103: 1,
+		200: 201, 201: 202, 202: 203, 203: 204, 204: 1,
+		300: 301, 301: 302, 302: 303, 303: 1,
+		400: 1,
+		500: 501, 501: 1,
+		600: 601, 601: 602, 602: 603, 603: 1,
+	}
+
+	tests := []struct {
+		name        string
+		pid         int
+		wantForward bool
+	}{
+		{"server in a macOS ssh shell", 100, true},
+		{"server in a Linux ssh shell", 200, true},
+		{"child of a test binary in an ssh shell", 300, false},
+		{"sshd itself", 400, false},
+		{"systemd user service", 500, true},
+		{"server in a Tailscale SSH shell", 600, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &mockDaemonClient{}
+			sm, _ := NewSessionMonitor(SessionConfig{
+				SessionID:       "test",
+				DaemonClient:    client,
+				Logger:          slog.Default(),
+				IgnoreProcesses: []string{"sshd", "systemd", "ssh-agent", `/\.test$/`},
+				PortEventSource: &mockPortEventSource{},
+			})
+			sm.resolveProcessName = func(pid int) string { return nameMap[pid] }
+			sm.resolveProcessCwd = func(pid int) string { return "" }
+			sm.resolveParentPID = func(pid int) int { return parentMap[pid] }
+
+			sm.handlePortEvent(PortEvent{
+				Type: PortOpened, PID: tt.pid, Port: 5000,
+				BindAddr: "127.0.0.1", Timestamp: time.Now(),
+			})
+
+			if got := client.forwardCount() > 0; got != tt.wantForward {
+				t.Errorf("forward created = %v, want %v", got, tt.wantForward)
+			}
+		})
+	}
+}
